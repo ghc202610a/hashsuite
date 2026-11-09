@@ -5,6 +5,8 @@ Run from the extracted suite directory with: python3 -m unittest discover -s tes
 GNU differential cases are skipped when the corresponding GNU utility is absent.
 """
 import hashlib
+import contextlib
+import io
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
@@ -268,6 +271,90 @@ class HashSuiteTests(unittest.TestCase):
         (self.cwd / "GNU.SUMS").write_bytes(gnu.stdout)
         ours = run([ROOT / "hashcheck.py", "--status", "GNU.SUMS"], cwd=self.cwd)
         self.assertEqual(ours.returncode, 0, ours.stderr)
+
+
+    def test_malformed_manifest_warning_and_strict_modes(self):
+        (self.cwd / "f").write_bytes(b"x")
+        digest = hashlib.sha256(b"x").hexdigest()
+        (self.cwd / "SUMS").write_bytes(b"not a checksum\n" + digest.encode() + b"  f\n")
+
+        default = run([ROOT / "hashcheck.py", "SUMS"], cwd=self.cwd)
+        self.assertEqual(default.returncode, 0, default.stderr)
+        self.assertEqual(default.stderr, b"")
+
+        warned = run([ROOT / "hashcheck.py", "--warn", "SUMS"], cwd=self.cwd)
+        self.assertEqual(warned.returncode, 0, warned.stderr)
+        self.assertIn(b"improperly formatted checksum line", warned.stderr)
+
+        strict = run([ROOT / "hashcheck.py", "--strict", "SUMS"], cwd=self.cwd)
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertEqual(strict.stderr, b"")
+
+        both = run([ROOT / "hashcheck.py", "--warn", "--strict", "SUMS"], cwd=self.cwd)
+        self.assertNotEqual(both.returncode, 0)
+        self.assertIn(b"improperly formatted checksum line", both.stderr)
+
+    def test_mixed_algorithms_filter_only_selected_records(self):
+        (self.cwd / "f").write_bytes(b"mixed algorithms")
+        sha1 = hashlib.sha1(b"mixed algorithms").hexdigest()
+        sha256 = hashlib.sha256(b"mixed algorithms").hexdigest()
+        (self.cwd / "MIXED").write_text(f"{sha1}  f\n{sha256}  f\n")
+        result = run([ROOT / "hashcheck.py", "--sha256", "--status", "MIXED"], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_multiple_manifests_share_file_hash_work(self):
+        import hashcheck
+        (self.cwd / "f").write_bytes(b"shared work")
+        digest = hashlib.sha256(b"shared work").hexdigest()
+        (self.cwd / "A.SUMS").write_text(f"{digest}  f\n")
+        (self.cwd / "B.SUMS").write_text(f"{digest}  f\n")
+        original = hashcheck.hash_file
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(self.cwd)
+            with mock.patch.object(hashcheck, "hash_file", wraps=original) as hashed:
+                with mock.patch.object(sys, "argv", [str(ROOT / "hashcheck.py"), "--status", "A.SUMS", "B.SUMS"]):
+                    fake_stdout = mock.Mock()
+                    fake_stdout.buffer = io.BytesIO()
+                    with mock.patch.object(sys, "stdout", fake_stdout), contextlib.redirect_stderr(io.StringIO()):
+                        result = hashcheck.main()
+            self.assertEqual(result, 0)
+            self.assertEqual(hashed.call_count, 1)
+        finally:
+            os.chdir(previous_cwd)
+
+    def test_duplicate_generation_inputs_emit_duplicate_records(self):
+        (self.cwd / "f").write_bytes(b"duplicate input")
+        result = run([ROOT / "sha256sum", "f", "f"], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assertEqual(result.stdout.splitlines()[0], result.stdout.splitlines()[1])
+
+    def test_combined_inventory_output(self):
+        (self.cwd / "f").write_bytes(b"combined output")
+        digest256 = hashlib.sha256(b"combined output").hexdigest()
+        (self.cwd / "SUMS").write_text(f"{digest256}  f\n")
+        result = run([ROOT / "hashcheck.py", "--status", "SUMS", "--outsha256512", "BOTH"], cwd=self.cwd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.cwd / "BOTH").read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0].split()[0], digest256)
+        self.assertEqual(lines[1].split()[0], hashlib.sha512(b"combined output").hexdigest())
+
+
+
+    def test_inventory_staging_failure_preserves_existing_outputs(self):
+        (self.cwd / "f").write_bytes(b"stage failure")
+        digest = hashlib.sha256(b"stage failure").hexdigest()
+        (self.cwd / "SUMS").write_text(f"{digest}  f\n")
+        (self.cwd / "OUT256").write_bytes(b"old sha256 inventory")
+        (self.cwd / "OUT512").write_bytes(b"old sha512 inventory")
+        result = run([ROOT / "hashcheck.py", "--status", "SUMS", "--outsha256", "OUT256",
+                      "--outsha512", "missing-dir/OUT512"], cwd=self.cwd)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.cwd / "OUT256").read_bytes(), b"old sha256 inventory")
+        self.assertEqual((self.cwd / "OUT512").read_bytes(), b"old sha512 inventory")
+
 
 
 if __name__ == "__main__":
