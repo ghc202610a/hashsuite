@@ -28,6 +28,7 @@ def decode_filename(name, escaped):
         nxt = name[i + 1]
         if nxt == 0x5c: result.append(0x5c)
         elif nxt == ord("n"): result.append(0x0a)
+        elif nxt == ord("r"): result.append(0x0d)
         else: raise ValueError("invalid escape in filename")
         i += 2
     return bytes(result)
@@ -36,14 +37,21 @@ def decode_filename(name, escaped):
 def parse_manifest(data, manifest_name, selected):
     records, malformed = [], 0
     for line_no, line in enumerate(data.split(b"\n"), 1):
-        if not line: continue
+        # GNU accepts CRLF manifests; a literal CR in a filename is escaped as \r.
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        if not line or line.startswith(b"#"):
+            continue
         escaped = line.startswith(b"\\")
         body = line[1:] if escaped else line
         found = None
-        # Test supported digest lengths longest-first; separator must follow digest.
-        for length in (128, 96, 64, 40):
-            if len(body) >= length + 2 and body[length:length+2] in (b"  ", b" *"):
-                found = (length, body[:length], body[length+2:]); break
+        # Validate each digest candidate before accepting its separator. Otherwise
+        # a long filename can contain "  " or " *" at a longer candidate offset.
+        for length in (40, 64, 96, 128):
+            candidate = body[:length]
+            if (len(body) >= length + 2 and _HEX.fullmatch(candidate)
+                    and body[length:length+2] in (b"  ", b" *")):
+                found = (length, candidate, body[length+2:]); break
         if found is None:
             malformed += 1
             print(f"hashcheck.py: {manifest_name}:{line_no}: improperly formatted checksum line", file=sys.stderr)
@@ -66,8 +74,9 @@ def parse_manifest(data, manifest_name, selected):
 
 
 def display_name(name):
-    if b"\\" in name or b"\n" in name:
-        return b"\\" + name.replace(b"\\", b"\\\\").replace(b"\n", b"\\n")
+    if any(ch in name for ch in (b"\\", b"\n", b"\r")):
+        return (b"\\" + name.replace(b"\\", b"\\\\")
+                .replace(b"\n", b"\\n").replace(b"\r", b"\\r"))
     return name
 
 
@@ -112,11 +121,17 @@ def main():
         if a.outsha256 or a.outsha512: p.error("--outsha256512 conflicts with separate SHA-256/SHA-512 outputs")
         output_paths["sha256512"] = a.outsha256512
     out_algorithms = set()
+    seen_outputs = []
     for key, path in output_paths.items():
         if path:
             out_algorithms.update(("sha256", "sha512") if key == "sha256512" else (key,))
-            if path in a.manifests or any(r["filename"] != b"-" and same_file(path, os.fsdecode(r["filename"])) for r in records):
-                p.error(f"output path conflicts with an input: {path}")
+            if any(manifest != "-" and same_file(path, manifest) for manifest in a.manifests):
+                p.error(f"output path conflicts with an input manifest: {path}")
+            if any(r["filename"] != b"-" and same_file(path, os.fsdecode(r["filename"])) for r in records):
+                p.error(f"output path conflicts with a checked input file: {path}")
+            if any(same_file(path, previous) for previous in seen_outputs):
+                p.error("output destinations must be distinct")
+            seen_outputs.append(path)
     work = {}
     for idx, rec in enumerate(records):
         item = work.setdefault(rec["filename"], {"algorithms": set(), "indices": []})

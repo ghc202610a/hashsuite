@@ -5,62 +5,82 @@ Python 3 streaming checksum tools. Requires only the Python standard library.
 
 Files
 -----
-hashcore.py   Shared streaming hashing engine.
-hashfiles.py  Parallel manifest generator.
-hashcheck.py  Parallel GNU-style manifest verifier.
-sha256sum     SHA-256 GNU-style front-end wrapper.
-sha512sum     SHA-512 GNU-style front-end wrapper.
+hashcore.py       Shared streaming hashing engine.
+hashfiles.py      Parallel manifest generator.
+hashcheck.py      Parallel multi-algorithm manifest verifier.
+sha256sum         SHA-256 GNU-style front end (symlink to hashfiles.py).
+sha512sum         SHA-512 GNU-style front end (symlink to hashfiles.py).
+tests/            Regression tests and deterministic filename-corpus tests.
 
-Combined generation
--------------------
+Generation
+----------
+
+Combined SHA-256 + SHA-512 generation (default):
   ./hashfiles.py file1 file2
 
-By default this appends SHA256SUMS and SHA512SUMS in the current directory.
-Use --truncate to replace them. Use -j N and --chunk-mib N to tune parallel
-file processing and read-buffer size. --no-advice disables best-effort
-POSIX sequential/no-reuse advice.
+By default, append records to SHA256SUMS and SHA512SUMS in the current directory.
+Use --truncate to replace those files. Use -j N and --chunk-mib N to tune
+parallel file processing and read buffer size. --no-advice disables optional
+POSIX sequential/no-reuse file-cache advice.
 
-Optional algorithms
--------------------
-  ./hashfiles.py --sha1 --sha256 --sha384 --sha512 file1 file2
+Optional algorithms:
+  ./hashfiles.py --sha1 --sha384 file1 file2
+  ./hashfiles.py --sha1 --sha256 --sha384 --sha512 file1
 
-SHA-1 and SHA-384 are supported but are not calculated by default. The
-verifier recognizes SHA-1, SHA-256, SHA-384, and SHA-512 records by digest
-length. Use --sha1, --sha256, --sha384, and/or --sha512 to select algorithms;
-without selectors it verifies every recognized algorithm in the manifest(s).
+Per-algorithm outputs:
+  ./hashfiles.py --sha1 --sha384 --outsha1 SHA1SUMS --outsha384 SHA384SUMS file1
+  ./hashfiles.py --outsha256512 BOTH.SUMS file1 file2
 
-GNU-style personalities
------------------------
+The sha256sum and sha512sum front ends calculate only their named algorithm:
   ./sha256sum file1 file2
-  ./sha256sum --check SHA256SUMS
   ./sha512sum file1 file2
-  ./sha512sum --check SHA512SUMS
+  cat file | ./sha256sum -
 
-The wrappers use the basename personality. They support common checksum
-workflows, not every GNU coreutils option or edge case. Files are read in
-binary mode. A filename of '-' denotes standard input in check manifests.
+On Unix, default output uses the GNU text-mode marker (two spaces). --binary
+or -b uses the binary marker (space plus '*'). --text or -t selects text mode.
+Files are always opened in binary mode by Python; on Unix this is equivalent
+for hashing purposes. A filename containing backslash, LF, or CR is escaped
+using GNU's leading-backslash convention and \\, \n, and \r escapes. Filename
+bytes are preserved using the filesystem encoding/surrogateescape interface.
 
-Verifier examples
------------------
+Verification
+------------
+
   ./hashcheck.py SHA256SUMS SHA512SUMS
   ./hashcheck.py --sha384 SHA384SUMS
-  ./hashcheck.py -j 4 SHA256SUMS
+  ./sha256sum --check SHA256SUMS
+  ./sha512sum --check SHA512SUMS
 
-Generation output options
--------------------------
-  --outsha1 FILE --outsha256 FILE --outsha384 FILE --outsha512 FILE
-  --outsha256512 FILE
+With no algorithm selector, hashcheck.py recognizes SHA-1, SHA-256, SHA-384,
+and SHA-512 by digest length. With selectors, it verifies only selected
+algorithms. Multiple manifests and duplicate records are supported; each
+unique checked pathname is read once, with all required digests calculated in
+that pass. Results are printed in manifest order.
 
-Without explicit output paths, combined mode appends SHA256SUMS and/or
-SHA512SUMS as applicable. Output paths must not collide with input files or
-with one another. Generation preserves input argument order.
-
-Verification can also refresh inventory files in the same file-reading pass:
+The verifier can refresh inventories during the same file-reading pass:
   ./hashcheck.py SHA256SUMS --outsha512 SHA512SUMS.new
   ./hashcheck.py SHA256SUMS --outsha256512 BASELINES.new
-The optional --outsha1, --outsha256, --outsha384, and --outsha512 options
-write separate inventories; --outsha256512 writes both algorithms to one file.
-These outputs are replaced atomically and include files that were readable even
-when an existing manifest checksum mismatched. Verification still exits nonzero
-for mismatches or read failures. Output paths may not collide with manifests or
-checked input files.
+
+Inventory outputs are written through temporary files and atomically replaced.
+Successfully read files are included even if an existing checksum mismatches.
+An output path may not alias an input manifest, checked input, or another
+output path. Standard input can be used as checked data when the manifest is a
+file; it cannot simultaneously supply both the manifest and checked data.
+
+Common verification options include --quiet, --status, --ignore-missing,
+--warn, and --strict. These tools implement common GNU checksum workflows,
+not every coreutils option or input format. In particular, --zero and BSD/tag
+formats are not currently implemented.
+
+Tests
+-----
+
+Run the local regression suite from this directory:
+  python3 -m unittest discover -s tests -v
+
+The suite includes byte-oriented and seeded-random valid Unix filename cases,
+long components and paths, CR/LF/backslash escaping, non-UTF-8 names, CRLF
+manifests, stdin, all four algorithms, output-path collision checks, and
+GNU differential tests when GNU coreutils sha*sum commands are installed.
+The GNU differential tests compare generated output and cross-check manifests
+in both directions. The seeded corpus is deterministic and reproducible.
