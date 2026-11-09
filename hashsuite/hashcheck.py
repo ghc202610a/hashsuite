@@ -104,7 +104,11 @@ def main():
     records, diagnostics = [], []
     try:
         for manifest in a.manifests:
-            data = sys.stdin.buffer.read() if manifest == "-" else open(manifest, "rb").read()
+            if manifest == "-":
+                data = sys.stdin.buffer.read()
+            else:
+                with open(manifest, "rb") as stream:
+                    data = stream.read()
             recs, bad = parse_manifest(data, manifest, selected)
             records.extend(recs); diagnostics.extend(bad)
     except OSError as exc:
