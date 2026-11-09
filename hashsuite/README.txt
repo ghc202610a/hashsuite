@@ -84,3 +84,21 @@ manifests, stdin, all four algorithms, output-path collision checks, and
 GNU differential tests when GNU coreutils sha*sum commands are installed.
 The GNU differential tests compare generated output and cross-check manifests
 in both directions. The seeded corpus is deterministic and reproducible.
+
+
+Verifier malformed-line controls
+-------------------------------
+Malformed checksum records are ignored by default, matching the usual GNU
+checksum behavior.  --warn prints diagnostics for malformed records; --strict
+returns a failure status if any malformed record is present.  The two options
+can be combined.  --status suppresses diagnostics and normal result output.
+
+Inventory output staging
+------------------------
+When hashcheck.py is asked to write multiple inventory files, it writes and
+flushes all temporary files before replacing any requested destination.  This
+prevents a failure while preparing a later output from leaving an earlier
+inventory partially refreshed.  Each final replacement is atomic on its own.
+
+The default worker count is capped at 32 to avoid creating an excessive number
+of threads on machines reporting very large CPU counts; use --jobs to override.

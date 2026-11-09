@@ -35,7 +35,7 @@ def decode_filename(name, escaped):
 
 
 def parse_manifest(data, manifest_name, selected):
-    records, malformed = [], 0
+    records, diagnostics = [], []
     for line_no, line in enumerate(data.split(b"\n"), 1):
         # GNU accepts CRLF manifests; a literal CR in a filename is escaped as \r.
         if line.endswith(b"\r"):
@@ -53,24 +53,21 @@ def parse_manifest(data, manifest_name, selected):
                     and body[length:length+2] in (b"  ", b" *")):
                 found = (length, candidate, body[length+2:]); break
         if found is None:
-            malformed += 1
-            print(f"hashcheck.py: {manifest_name}:{line_no}: improperly formatted checksum line", file=sys.stderr)
+            diagnostics.append(f"hashcheck.py: {manifest_name}:{line_no}: improperly formatted checksum line")
             continue
         length, digest, filename = found
         if not _HEX.fullmatch(digest) or not filename:
-            malformed += 1
-            print(f"hashcheck.py: {manifest_name}:{line_no}: improperly formatted checksum line", file=sys.stderr)
+            diagnostics.append(f"hashcheck.py: {manifest_name}:{line_no}: improperly formatted checksum line")
             continue
         alg = _LENGTHS[length]
         try: filename = decode_filename(filename, escaped)
         except ValueError as exc:
-            malformed += 1
-            print(f"hashcheck.py: {manifest_name}:{line_no}: {exc}", file=sys.stderr)
+            diagnostics.append(f"hashcheck.py: {manifest_name}:{line_no}: {exc}")
             continue
         if alg in selected:
             records.append({"algorithm": alg, "expected": bytes.fromhex(digest.decode("ascii")),
                             "filename": filename, "manifest": manifest_name, "line": line_no})
-    return records, malformed
+    return records, diagnostics
 
 
 def display_name(name):
@@ -83,7 +80,7 @@ def display_name(name):
 def main():
     personality = os.path.basename(sys.argv[0])
     p = argparse.ArgumentParser(description="Verify GNU-style SHA checksum manifests.")
-    p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1)
+    p.add_argument("-j", "--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     p.add_argument("--chunk-mib", type=int, default=8)
     p.add_argument("--no-advice", action="store_true")
     for alg in SUPPORTED: p.add_argument("--" + alg, action="store_true", help=f"verify {alg.upper()} records")
@@ -104,12 +101,12 @@ def main():
     requested = {alg for alg in SUPPORTED if getattr(a, alg)}
     if personality in ("sha256sum", "sha512sum") and not requested: requested = {personality[:-3]}
     selected = requested or set(SUPPORTED)
-    records, malformed = [], 0
+    records, diagnostics = [], []
     try:
         for manifest in a.manifests:
             data = sys.stdin.buffer.read() if manifest == "-" else open(manifest, "rb").read()
             recs, bad = parse_manifest(data, manifest, selected)
-            records.extend(recs); malformed += bad
+            records.extend(recs); diagnostics.extend(bad)
     except OSError as exc:
         print(f"hashcheck.py: {exc}", file=sys.stderr); return 1
     if any(r["filename"] == b"-" for r in records) and "-" in a.manifests:
@@ -163,32 +160,41 @@ def main():
             mismatches += 1
             if not a.status: sys.stdout.buffer.write(display_name(name) + b": FAILED\n")
         elif not (a.quiet or a.status): sys.stdout.buffer.write(display_name(name) + b": OK\n")
-    if malformed and (a.warn or a.strict):
-        print(f"hashcheck.py: WARNING: {malformed} improperly formatted line(s)", file=sys.stderr)
-    # Optional inventories are atomic and include every successfully read file,
-    # even if an existing checksum record for that file did not match.
-    for key, path in output_paths.items():
-        if not path: continue
-        algs = ("sha256", "sha512") if key == "sha256512" else (key,)
-        temp_name = None
-        try:
+    if diagnostics and a.warn and not a.status:
+        for message in diagnostics:
+            print(message, file=sys.stderr)
+    # Stage every requested inventory before replacing any destination. This
+    # prevents a later write/staging failure from leaving earlier outputs updated.
+    staged = []
+    try:
+        for key, path in output_paths.items():
+            if not path: continue
+            algs = ("sha256", "sha512") if key == "sha256512" else (key,)
             fd, temp_name = tempfile.mkstemp(prefix=".hashcheck-", dir=os.path.dirname(os.path.abspath(path)))
-            with os.fdopen(fd, "wb") as out:
-                for name in work:
-                    digest_map, error = results.get(name, (None, OSError("not processed")))
-                    if error is None:
-                        for alg in algs: out.write(checksum_line(digest_map[alg], os.fsdecode(name)))
-                out.flush(); os.fsync(out.fileno())
-            os.replace(temp_name, path); temp_name = None
-        except OSError as exc:
-            failures += 1
-            print(f"hashcheck.py: cannot write {path}: {exc}", file=sys.stderr)
-        finally:
-            if temp_name is not None:
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    for name in work:
+                        digest_map, error = results.get(name, (None, OSError("not processed")))
+                        if error is None:
+                            for alg in algs: out.write(checksum_line(digest_map[alg], os.fsdecode(name)))
+                    out.flush(); os.fsync(out.fileno())
+            except BaseException:
                 try: os.unlink(temp_name)
                 except OSError: pass
+                raise
+            staged.append((temp_name, path))
+        for temp_name, path in staged:
+            os.replace(temp_name, path)
+        staged.clear()
+    except OSError as exc:
+        failures += 1
+        print(f"hashcheck.py: cannot write inventory: {exc}", file=sys.stderr)
+    finally:
+        for temp_name, _ in staged:
+            try: os.unlink(temp_name)
+            except OSError: pass
     sys.stdout.buffer.flush()
-    return 1 if failures or mismatches or (malformed and a.strict) else 0
+    return 1 if failures or mismatches or (diagnostics and a.strict) else 0
 
 
 if __name__ == "__main__": sys.exit(main())

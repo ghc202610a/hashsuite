@@ -40,7 +40,7 @@ def main():
         return hashcheck.main()
     default_algorithms = {"sha256sum": ("sha256",), "sha512sum": ("sha512",)}.get(personality, DEFAULTS)
     p = argparse.ArgumentParser(description="Generate parallel SHA checksum manifests.")
-    p.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1)
+    p.add_argument("-j", "--jobs", type=int, default=min(os.cpu_count() or 1, 8))
     p.add_argument("--chunk-mib", type=int, default=8, metavar="N")
     p.add_argument("--no-advice", action="store_true")
     mode = p.add_mutually_exclusive_group()
