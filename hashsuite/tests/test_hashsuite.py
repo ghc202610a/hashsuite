@@ -314,10 +314,10 @@ class HashSuiteTests(unittest.TestCase):
             os.chdir(self.cwd)
             with mock.patch.object(hashcheck, "hash_file", wraps=original) as hashed:
                 with mock.patch.object(sys, "argv", [str(ROOT / "hashcheck.py"), "--status", "A.SUMS", "B.SUMS"]):
-                    fake_stdout = mock.Mock()
-                    fake_stdout.buffer = io.BytesIO()
-                    with mock.patch.object(sys, "stdout", fake_stdout), contextlib.redirect_stderr(io.StringIO()):
-                        result = hashcheck.main()
+                    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout:
+                        with contextlib.redirect_stdout(stdout):
+                            with contextlib.redirect_stderr(io.StringIO()):
+                                result = hashcheck.main()
             self.assertEqual(result, 0)
             self.assertEqual(hashed.call_count, 1)
         finally:
